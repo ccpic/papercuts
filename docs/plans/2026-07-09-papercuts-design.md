@@ -1,6 +1,6 @@
 # papercuts — design doc
 
-2026-07-09. Coordinator-authored. Status: r6 — amended for the won't-fix closure reason. See Amendments for full triage provenance.
+2026-07-09. Coordinator-authored. Status: r7 — amended for the debt kind. See Amendments for full triage provenance.
 
 ## Thesis and provenance
 
@@ -228,6 +228,20 @@ Adds a deliberate no-fix closure to the terminal resolution reasons. `won't-fix`
 ## Amendments (r5, contract v2 lifecycle 2026-08-14)
 
 Contract v2 adds bounded triage reads and explicit queue lifecycle without weakening append-only history. Exact repeatable `list --id` filters support post-selection detail retrieval; `--projection triage` limits ranking payload. Open, blocked, and resolved become distinct states. Block/unblock are reversible queue transitions; resolve stays terminal and gains structured reasons. Every mutation reports changed-now, already-in-state, and dry-run ID sets so callers can prove exactly what happened under the command's lock instead of rereading the whole backlog. Legacy resolve lines remain readable as reason `legacy`, but new callers cannot emit that value. Windows partial-append rollback now reopens the locked path with ordinary write access before truncation.
+
+## Amendments (r7, debt kind 2026-10-17)
+
+Contract v3 adds a second record kind for repository debt. A `debt` record is one ledger (a type-checker baseline, an exemption table, a coverage floor), not one entry inside it: the per-entry detail stays in the repository's own file, because those entries are repository business rules and the crate must not carry them. Three fields join the shared shape, all required on a debt and refused on a cut: `owner` (the controlling party), `baseline_count` (the declared ledger size at registration), and `path` (a repository-relative pointer to the authoritative file).
+
+`path` is the debt identity: `compute_debt_id(path)` hashes the path alone, unlike `compute_id(ts, agent, text, severity, tags)`. The distinction is load-bearing — a ledger migration re-run at a later wall-clock second would hash to a fresh ID under the cut scheme and stack a duplicate record for a ledger that is already registered, whereas the path-addressed ID makes the re-run a first-wins no-op.
+
+`baseline_count` is stored, never compared. Ratchet verdicts ("did this baseline grow?") are the repository's own business rule, expressed by its checker, which reads `list --kind debt` and decides; the crate only records what was declared. `deadline` and `suite` were considered and cut: only two of the enumerated ledgers carry a deadline and both already hard-fail on expiry in their own checker, and `path` already carries the identity a `suite` name would have provided.
+
+Reads: `list` gains `--kind cut|debt|all`, defaulting to `cut` so existing consumers (the `fix-papercuts` batch selector, the orca weekday sweep) never see debt unless they ask, plus `--owner`. Triage items carry `owner`, `baseline_count`, and `path`. Writes reuse `add` with `--kind debt` rather than adding a subcommand, so the existing exclusive-lock, append, and first-wins machinery is unchanged.
+
+Lifecycle: debt reuses open/blocked/resolved and every resolve reason verbatim. `rebaseline <ID> --baseline-count <N> --note <TEXT>` is new and is the only channel out of a terminal state — debt recurs (a baseline can grow back after new violations), while `resolve` stays terminal and fold is first-wins, so a re-registration of the same path would otherwise be silently dropped as a duplicate. `rebaseline` is debt-only (a cut has no ledger to re-measure) and requires a note, because an unexplained baseline move is unauditable. `doctor` gains a debt branch reporting missing `owner`/`path`/`baseline_count`, an ID that does not derive from its `path`, and `orphan_rebaseline` for a rebaseline pointing at a missing or non-debt record; each defect reports independently, so a row with several problems yields several findings rather than only the first.
+
+The doctor branch had to land with the first debt record in any consuming repository: `task papercuts:commit` refuses to commit an unhealthy ledger, and an unrecognized kind reports `unknown_kind`.
 
 ## Wave plan
 

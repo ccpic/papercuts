@@ -6,7 +6,7 @@ Agents hit friction constantly — dead-end tool calls, broken links, missing he
 
 ```
 $ papercuts add "yarn web:test with a root-relative path finds no files; the workspace test cwd is apps/web" --tag tooling
-{"ok":true,"data":{"changed":true,"record":{"kind":"cut","id":"pc_9f2c41d0a8b3","ts":"2026-07-09T21:14:03.412Z","agent":"claude-code","text":"yarn web:test with a root-relative path finds no files; the workspace test cwd is apps/web","tags":["tooling"],"severity":"minor",...}},"meta":{"contract":2,"file":"/repo/.papercuts.jsonl","agent_source":"detected"}}
+{"ok":true,"data":{"changed":true,"record":{"kind":"cut","id":"pc_9f2c41d0a8b3","ts":"2026-07-09T21:14:03.412Z","agent":"claude-code","text":"yarn web:test with a root-relative path finds no files; the workspace test cwd is apps/web","tags":["tooling"],"severity":"minor",...}},"meta":{"contract":3,"file":"/repo/.papercuts.jsonl","agent_source":"detected"}}
 ```
 
 The idea comes from [a tool Steve Ruiz built](https://x.com/steveruizok) for his own repos: once agents had a place to complain, they immediately surfaced real workflow defects — quoting bugs, wrong test working directories, YAML footguns — that they'd been eating silently for months.
@@ -38,6 +38,25 @@ papercuts doctor                         # validate the log file
 ```
 
 - **Agent-first contract**: stdout is data only; one JSON envelope per command; structured errors on stderr with stable codes, documented exit codes, and a paste-ready `suggested_fix`. `papercuts schema` returns the whole contract.
+
+### Repository debt ledgers
+
+A second record kind carries *repository debt* — the standing baseline tables a repo ratchets
+down (type-checker baselines, exemption tables, coverage floors). One ledger is one record,
+addressed by its repository path, so a migration re-run at a new wall-clock time is a no-op
+rather than a stack of duplicates.
+
+```
+papercuts add --kind debt --owner platform-maintainer \
+  --baseline-count 714 --path scripts/typecheck/pyright-baseline.json
+papercuts list --kind debt --projection triage     # debt is invisible to a bare `list`
+papercuts rebaseline pc_83fd5cb64d61 --baseline-count 735 --note "baseline grew back after new violations"
+```
+
+`owner`, `baseline_count`, and `path` are required on a debt and refused on a cut. The crate
+*stores* `baseline_count` without comparing it: the ratchet verdict belongs to the repository's
+own checker, which reads `list --kind debt` and fails on growth. A resolved debt can be reopened
+with `rebaseline` — debt recurs, and `resolve` is otherwise terminal.
 - **Concurrency-safe**: multiple agents on one file are fine (advisory locking, atomic appends, self-healing torn lines).
 - **Deterministic**: content-addressed IDs, stable sort, reproducible-clock override for tests.
 - **Never rewrites history**: `block`, `unblock`, and terminal `resolve` operations append events; the log is a journal, not a database.
@@ -81,7 +100,7 @@ Duplicate lines after a merge are harmless — the fold is first-wins and `paper
 
 ## Contract
 
-Everything an agent needs is in `papercuts schema`: contract version 2, commands and flags with read-only/appends annotations, env vars (`PAPERCUTS_FILE`, `PAPERCUTS_AGENT`, `PAPERCUTS_NOW`), record shapes, error codes, and the exit-code dictionary (0 success · 2 usage · 65 bad input · 66 not found · 70 internal · 74 I/O · 75 lock timeout, retryable · 77 permission denied · 78 config). Empty results are exit 0, never errors.
+Everything an agent needs is in `papercuts schema`: contract version 3, commands and flags with read-only/appends annotations, env vars (`PAPERCUTS_FILE`, `PAPERCUTS_AGENT`, `PAPERCUTS_NOW`), record shapes, error codes, and the exit-code dictionary (0 success · 2 usage · 65 bad input · 66 not found · 70 internal · 74 I/O · 75 lock timeout, retryable · 77 permission denied · 78 config). Empty results are exit 0, never errors.
 
 ## License
 

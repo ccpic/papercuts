@@ -1,8 +1,11 @@
-use crate::cli::AddArgs;
+use crate::cli::{AddArgs, AddKind};
 use crate::error::{AppError, AppResult};
 use crate::output::{self, Meta};
 use crate::store;
-use crate::{CutRecord, Evidence, compute_id, format_timestamp, resolve_agent};
+use crate::{
+    CutRecord, Evidence, KIND_CUT, KIND_DEBT, compute_debt_id, compute_id, format_timestamp,
+    resolve_agent,
+};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 #[cfg(not(unix))]
@@ -22,10 +25,62 @@ pub struct AddData {
     pub record: CutRecord,
 }
 
+/// The three debt-only fields, validated together so a partial set is refused.
+struct DebtFields {
+    owner: String,
+    baseline_count: u64,
+    path: String,
+}
+
+fn debt_fields(args: &AddArgs) -> AppResult<Option<DebtFields>> {
+    let supplied = args.owner.is_some() || args.baseline_count.is_some() || args.path.is_some();
+    if args.kind == AddKind::Cut {
+        if supplied {
+            return Err(AppError::invalid_input(
+                "--owner, --baseline-count, and --path are debt-only flags",
+                "Pass --kind debt to file a ledger record, or drop the debt flags.",
+            ));
+        }
+        return Ok(None);
+    }
+    let owner = args.owner.as_deref().unwrap_or("").trim().to_owned();
+    if owner.is_empty() {
+        return Err(AppError::invalid_input(
+            "debt records require a non-empty --owner",
+            "Pass --owner <NAME> naming the party that controls the ledger.",
+        ));
+    }
+    let path = args.path.as_deref().unwrap_or("").trim().to_owned();
+    if path.is_empty() {
+        return Err(AppError::invalid_input(
+            "debt records require a non-empty --path",
+            "Pass --path <PATH> pointing at the authoritative ledger in this repository.",
+        ));
+    }
+    let baseline_count = args.baseline_count.ok_or_else(|| {
+        AppError::invalid_input(
+            "debt records require --baseline-count",
+            "Pass --baseline-count <N> with the declared ledger size; 0 is valid.",
+        )
+    })?;
+    Ok(Some(DebtFields {
+        owner,
+        baseline_count,
+        path,
+    }))
+}
+
 pub fn run(args: AddArgs, file: Option<PathBuf>, pretty: bool, now: Timestamp) -> AppResult<i32> {
     let resolved = store::discover(file)?;
     let evidence = build_evidence(&args)?;
-    let text = read_text(args.text)?;
+    let debt = debt_fields(&args)?;
+    // A debt's identity is its ledger path, which doubles as the default label, so the
+    // four-flag form writes a record without a positional TEXT or piped stdin.
+    let implicit_text = debt.as_ref().map(|fields| fields.path.clone());
+    let text = match (implicit_text, args.text) {
+        (Some(path), None) => path,
+        (_, text) => read_text(text)?,
+    };
     if text.trim().is_empty() {
         return Err(AppError::invalid_input(
             "papercut text cannot be empty or whitespace-only",
@@ -62,9 +117,16 @@ pub fn run(args: AddArgs, file: Option<PathBuf>, pretty: bool, now: Timestamp) -
     tags.sort();
     let mut warnings = Vec::new();
     let ts = format_timestamp(now);
+    let (kind, id) = match &debt {
+        Some(fields) => (KIND_DEBT, compute_debt_id(&fields.path)),
+        None => (
+            KIND_CUT,
+            compute_id(&ts, &agent, &text, args.severity, &tags),
+        ),
+    };
     let record = CutRecord {
-        kind: "cut".into(),
-        id: compute_id(&ts, &agent, &text, args.severity, &tags),
+        kind: kind.into(),
+        id,
         ts,
         agent,
         text,
@@ -79,6 +141,9 @@ pub fn run(args: AddArgs, file: Option<PathBuf>, pretty: bool, now: Timestamp) -
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned()),
         evidence,
+        owner: debt.as_ref().map(|fields| fields.owner.clone()),
+        baseline_count: debt.as_ref().map(|fields| fields.baseline_count),
+        path: debt.as_ref().map(|fields| fields.path.clone()),
     };
     let trimmed = record.text.trim_start();
     if trimmed.starts_with("RESOLUTION") || trimmed.starts_with("RESOLVED") {

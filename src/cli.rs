@@ -30,6 +30,7 @@ pub enum Command {
     Add(AddArgs),
     List(ListArgs),
     Resolve(ResolveArgs),
+    Rebaseline(RebaselineArgs),
     Block(BlockArgs),
     Unblock(UnblockArgs),
     Schema {
@@ -71,6 +72,60 @@ pub struct AddArgs {
         help = "Additional evidence or filing note"
     )]
     pub evidence: Option<String>,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = AddKind::Cut,
+        help = "Record kind: cut (default) or debt (ledger baseline)"
+    )]
+    pub kind: AddKind,
+    #[arg(
+        long,
+        value_name = "OWNER",
+        help = "Debt only: ledger controller (required)"
+    )]
+    pub owner: Option<String>,
+    #[arg(
+        long = "baseline-count",
+        value_name = "N",
+        help = "Debt only: declared ledger size at registration (required)"
+    )]
+    pub baseline_count: Option<u64>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Debt only: repository-relative ledger path, also the record identity (required)"
+    )]
+    pub path: Option<String>,
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AddKind {
+    Cut,
+    Debt,
+}
+
+#[derive(Debug, Args)]
+pub struct RebaselineArgs {
+    #[arg(
+        value_name = "ID",
+        num_args = 1..,
+        required = true,
+        help = "One or more debt IDs or unique prefixes"
+    )]
+    pub ids: Vec<String>,
+    #[arg(
+        long = "baseline-count",
+        value_name = "N",
+        help = "New declared ledger size"
+    )]
+    pub baseline_count: u64,
+    #[arg(long, allow_hyphen_values = true, help = "Required assessment note")]
+    pub note: String,
+    #[arg(long)]
+    pub agent: Option<String>,
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -95,6 +150,17 @@ pub struct ListArgs {
     pub format: OutputFormat,
     #[arg(long, value_enum, default_value_t = ListProjection::Full)]
     pub projection: ListProjection,
+    #[arg(long, value_enum, default_value_t = KindFilter::Cut)]
+    pub kind: KindFilter,
+    #[arg(long, value_name = "OWNER")]
+    pub owner: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum KindFilter {
+    Cut,
+    Debt,
+    All,
 }
 
 #[derive(Debug, Args)]

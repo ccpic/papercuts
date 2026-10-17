@@ -1,7 +1,7 @@
 use crate::error::{AppError, AppResult};
 use crate::{
-    BlockRecord, Blockage, CutRecord, ItemStatus, ListItem, Resolution, ResolveRecord,
-    UnblockRecord,
+    BlockRecord, Blockage, CutRecord, ItemStatus, ListItem, RebaselineRecord, Resolution,
+    ResolveRecord, UnblockRecord,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -36,6 +36,7 @@ struct WarningCounts {
     duplicate_resolves: usize,
     orphan_resolves: usize,
     orphan_blocks: usize,
+    orphan_rebaselines: usize,
 }
 
 pub fn discover(flag: Option<PathBuf>) -> AppResult<ResolvedFile> {
@@ -253,7 +254,8 @@ fn append_bytes_with(
 
 pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
     let mut cuts = BTreeMap::<String, CutRecord>::new();
-    let mut resolves = HashMap::<String, ResolveRecord>::new();
+    let mut resolves = HashMap::<String, (usize, ResolveRecord)>::new();
+    let mut rebaselines = HashMap::<String, (usize, RebaselineRecord)>::new();
     let mut blockages = HashMap::<String, Option<BlockRecord>>::new();
     let mut counts = WarningCounts::default();
     let complete_len = if bytes.is_empty() || bytes.ends_with(b"\n") {
@@ -268,7 +270,7 @@ pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
 
     let complete = &bytes[..complete_len];
     let complete = complete.strip_suffix(b"\n").unwrap_or(complete);
-    for raw in complete.split(|byte| *byte == b'\n') {
+    for (index, raw) in complete.split(|byte| *byte == b'\n').enumerate() {
         if complete.is_empty() {
             break;
         }
@@ -277,7 +279,7 @@ pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
             continue;
         };
         match value.get("kind").and_then(Value::as_str) {
-            Some("cut") => match serde_json::from_value::<CutRecord>(value) {
+            Some("cut") | Some("debt") => match serde_json::from_value::<CutRecord>(value) {
                 Ok(mut cut) => {
                     if cut.ts.parse::<jiff::Timestamp>().is_err() {
                         counts.malformed += 1;
@@ -292,6 +294,16 @@ pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
                 }
                 Err(_) => counts.malformed += 1,
             },
+            Some("rebaseline") => match serde_json::from_value::<RebaselineRecord>(value) {
+                Ok(rebaseline) => {
+                    if rebaseline.ts.parse::<jiff::Timestamp>().is_err() {
+                        counts.malformed += 1;
+                        continue;
+                    }
+                    rebaselines.insert(rebaseline.id.clone(), (index, rebaseline));
+                }
+                Err(_) => counts.malformed += 1,
+            },
             Some("resolve") => match serde_json::from_value::<ResolveRecord>(value) {
                 Ok(resolve) => {
                     if resolve.ts.parse::<jiff::Timestamp>().is_err() {
@@ -301,7 +313,7 @@ pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
                     if resolves.contains_key(&resolve.id) {
                         counts.duplicate_resolves += 1;
                     } else {
-                        resolves.insert(resolve.id.clone(), resolve);
+                        resolves.insert(resolve.id.clone(), (index, resolve));
                     }
                 }
                 Err(_) => counts.malformed += 1,
@@ -340,15 +352,38 @@ pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
             counts.orphan_blocks += 1;
         }
     }
+    for id in rebaselines.keys() {
+        if !cuts.contains_key(id) {
+            counts.orphan_rebaselines += 1;
+        }
+    }
     let mut items: Vec<_> = cuts
         .into_values()
-        .map(|cut| {
-            let resolution = resolves.get(&cut.id).map(|resolve| Resolution {
-                ts: resolve.ts.clone(),
-                agent: resolve.agent.clone(),
-                reason: resolve.reason,
-                note: resolve.note.clone(),
-            });
+        .map(|mut cut| {
+            // A rebaseline recorded after a resolution reopens the debt: debt recurs,
+            // and resolve is terminal, so this is the only channel out of a terminal state.
+            let resolve_event = resolves.get(&cut.id);
+            let rebaseline_event = rebaselines.get(&cut.id);
+            let reopened = match (resolve_event, rebaseline_event) {
+                (Some((resolve_index, _)), Some((rebaseline_index, _))) => {
+                    rebaseline_index > resolve_index
+                }
+                (Some(_), None) => false,
+                (None, Some(_)) => true,
+                (None, None) => false,
+            };
+            let resolution = match (resolve_event, reopened) {
+                (Some((_, resolve)), false) => Some(Resolution {
+                    ts: resolve.ts.clone(),
+                    agent: resolve.agent.clone(),
+                    reason: resolve.reason,
+                    note: resolve.note.clone(),
+                }),
+                _ => None,
+            };
+            if let Some((_, rebaseline)) = rebaseline_event {
+                cut.baseline_count = Some(rebaseline.baseline_count);
+            }
             let blockage = if resolution.is_none() {
                 blockages
                     .get(&cut.id)
@@ -399,6 +434,11 @@ pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
     );
     warning(&mut warnings, counts.orphan_resolves, "orphan resolve");
     warning(&mut warnings, counts.orphan_blocks, "orphan block event");
+    warning(
+        &mut warnings,
+        counts.orphan_rebaselines,
+        "orphan rebaseline event",
+    );
     FoldResult { items, warnings }
 }
 

@@ -1,5 +1,5 @@
 use super::ids;
-use crate::cli::{ListArgs, ListProjection, OutputFormat, StatusFilter};
+use crate::cli::{KindFilter, ListArgs, ListProjection, OutputFormat, StatusFilter};
 use crate::error::{AppError, AppResult};
 use crate::output::{self, Meta};
 use crate::store;
@@ -37,6 +37,12 @@ pub struct TriageItem {
     pub status: ItemStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blockage: Option<Blockage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 impl From<ListItem> for TriageItem {
@@ -51,6 +57,9 @@ impl From<ListItem> for TriageItem {
             repo: item.cut.repo,
             status: item.status,
             blockage: item.blockage,
+            owner: item.cut.owner,
+            baseline_count: item.cut.baseline_count,
+            path: item.cut.path,
         }
     }
 }
@@ -96,6 +105,18 @@ pub fn run(args: ListArgs, file: Option<PathBuf>, pretty: bool, now: Timestamp) 
             StatusFilter::Blocked => item.status == ItemStatus::Blocked,
             StatusFilter::Resolved => item.status == ItemStatus::Resolved,
             StatusFilter::All => true,
+        })
+        .filter(|item| match args.kind {
+            KindFilter::Cut => item.cut.kind == crate::KIND_CUT,
+            KindFilter::Debt => item.cut.kind == crate::KIND_DEBT,
+            KindFilter::All => {
+                item.cut.kind == crate::KIND_CUT || item.cut.kind == crate::KIND_DEBT
+            }
+        })
+        .filter(|item| {
+            args.owner
+                .as_ref()
+                .is_none_or(|owner| item.cut.owner.as_ref() == Some(owner))
         })
         .filter(|item| ids.is_empty() || ids.contains(&item.cut.id))
         .filter(|item| {

@@ -4,7 +4,7 @@ Machine-facing contract for agents working in this repo.
 
 ## What this is
 
-`papercuts` is a Rust CLI (clap 4 derive) that lets AI agents log friction into an append-only JSONL file. Agent-only tool: JSON envelopes on stdout, structured errors on stderr, stable exit codes. The normative contract is `docs/plans/2026-07-09-papercuts-design.md` (r3) — treat it as law; its Amendments sections record review provenance and deliberate deviations from the rust-agent-cli skill (exit 74 extension, diagnose-only doctor, no --quiet).
+`papercuts` is a Rust CLI (clap 4 derive) that lets AI agents log friction into an append-only JSONL file. Agent-only tool: JSON envelopes on stdout, structured errors on stderr, stable exit codes. The normative contract is `docs/plans/2026-07-09-papercuts-design.md` (r7) — treat it as law; its Amendments sections record review provenance and deliberate deviations from the rust-agent-cli skill (exit 74 extension, diagnose-only doctor, no --quiet).
 
 ## Build and gate
 

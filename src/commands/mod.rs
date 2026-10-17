@@ -3,6 +3,7 @@ pub mod block;
 pub mod doctor;
 mod ids;
 pub mod list;
+pub mod rebaseline;
 pub mod resolve;
 pub mod schema;
 mod status_transition;
@@ -18,6 +19,7 @@ pub fn run(cli: Cli, now: Timestamp) -> AppResult<i32> {
         Command::Add(args) => add::run(args, cli.file, cli.pretty, now),
         Command::List(args) => list::run(args, cli.file, cli.pretty, now),
         Command::Resolve(args) => resolve::run(args, cli.file, cli.pretty, now),
+        Command::Rebaseline(args) => rebaseline::run(args, cli.file, cli.pretty, now),
         Command::Block(args) => block::run(args, cli.file, cli.pretty, now),
         Command::Unblock(args) => unblock::run(args, cli.file, cli.pretty, now),
         Command::Schema { target } => {

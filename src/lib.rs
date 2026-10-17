@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
-pub const CONTRACT_VERSION: u8 = 2;
+pub const CONTRACT_VERSION: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -51,6 +51,17 @@ pub struct CutRecord {
     pub repo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<Evidence>,
+    /// Debt only: the party that owns the ledger this record tracks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Debt only: the declared ledger size at registration time. The crate stores
+    /// it without comparing it; ratchet decisions belong to the repository's own checkers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_count: Option<u64>,
+    /// Debt only: repository-relative pointer to the authoritative ledger, and the
+    /// identity the debt ID is derived from (one ledger, one record).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +120,18 @@ pub struct UnblockRecord {
     pub ts: String,
     pub agent: String,
     pub note: Option<String>,
+}
+
+/// Reopens a resolved debt with a fresh declared baseline. The only channel that
+/// can leave a terminal state, because debt recurs (a ratchet baseline can grow back).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebaselineRecord {
+    pub kind: String,
+    pub id: String,
+    pub ts: String,
+    pub agent: String,
+    pub baseline_count: u64,
+    pub note: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,6 +234,9 @@ pub fn parse_since(value: &str, now: Timestamp) -> AppResult<Timestamp> {
     })
 }
 
+pub const KIND_CUT: &str = "cut";
+pub const KIND_DEBT: &str = "debt";
+
 pub fn compute_id(
     ts: &str,
     agent: &str,
@@ -226,6 +252,21 @@ pub fn compute_id(
         hash.update((field.len() as u32).to_le_bytes());
         hash.update(field.as_bytes());
     }
+    let digest = hash.finalize();
+    let mut id = String::with_capacity(15);
+    id.push_str("pc_");
+    for byte in &digest[..6] {
+        write!(&mut id, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    id
+}
+
+/// Debt IDs derive from `path` alone so that one ledger yields exactly one stable
+/// record: re-running a migration at a new wall-clock time must not stack duplicates.
+pub fn compute_debt_id(path: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update((path.len() as u32).to_le_bytes());
+    hash.update(path.as_bytes());
     let digest = hash.finalize();
     let mut id = String::with_capacity(15);
     id.push_str("pc_");

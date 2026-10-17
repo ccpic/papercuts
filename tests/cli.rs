@@ -3,6 +3,7 @@ use papercuts::commands::add::AddData;
 use papercuts::commands::block::BlockData;
 use papercuts::commands::doctor::DoctorData;
 use papercuts::commands::list::{ListData, TriageListData};
+use papercuts::commands::rebaseline::RebaselineData;
 use papercuts::commands::resolve::{ResolveData, ResolveManyData};
 use papercuts::commands::unblock::UnblockData;
 use papercuts::error::exit_code_map;
@@ -2696,5 +2697,365 @@ fn error_envelope_matrix() {
         &run_file(&ambiguous, &["resolve", "abcd"]),
         65,
         "ambiguous_id",
+    );
+}
+
+#[test]
+fn debt_ledger_record_roundtrips_add_list_fold_and_first_wins() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    let path = "scripts/typecheck/pyright-baseline.json";
+    let added: SuccessEnvelope<AddData> = success(&run_file(
+        &file,
+        &[
+            "add",
+            "--kind",
+            "debt",
+            "--owner",
+            "platform-maintainer",
+            "--baseline-count",
+            "714",
+            "--path",
+            path,
+            "--agent",
+            "tester",
+        ],
+    ));
+    assert!(added.data.changed);
+    let record = &added.data.record;
+    assert_eq!(record.kind, "debt");
+    // The debt identity derives from the ledger path, not from wall-clock fields.
+    assert_eq!(record.id, papercuts::compute_debt_id(path));
+    assert_eq!(record.text, path, "text defaults to the ledger path");
+    assert_eq!(record.owner.as_deref(), Some("platform-maintainer"));
+    assert_eq!(record.baseline_count, Some(714));
+    assert_eq!(record.path.as_deref(), Some(path));
+    assert!(record.evidence.is_none(), "evidence stays a cut-only field");
+
+    // Bare list defaults to --kind cut, so existing consumers never see debt.
+    let cuts_only: SuccessEnvelope<ListData> =
+        success(&run_file(&file, &["list", "--status", "all"]));
+    assert_eq!(cuts_only.data.count, 0);
+
+    let debts: SuccessEnvelope<TriageListData> = success(&run_file(
+        &file,
+        &["list", "--kind", "debt", "--projection", "triage"],
+    ));
+    assert_eq!(debts.data.count, 1);
+    let item = &debts.data.items[0];
+    assert_eq!(item.id, record.id);
+    assert_eq!(item.owner.as_deref(), Some("platform-maintainer"));
+    assert_eq!(item.baseline_count, Some(714));
+    assert_eq!(item.path.as_deref(), Some(path));
+
+    let by_owner: SuccessEnvelope<TriageListData> = success(&run_file(
+        &file,
+        &["list", "--kind", "debt", "--owner", "platform-maintainer"],
+    ));
+    assert_eq!(by_owner.data.count, 1);
+    let other_owner: SuccessEnvelope<TriageListData> = success(&run_file(
+        &file,
+        &["list", "--kind", "debt", "--owner", "someone-else"],
+    ));
+    assert_eq!(other_owner.data.count, 0);
+
+    let all_kinds: SuccessEnvelope<ListData> = success(&run_file(
+        &file,
+        &["list", "--kind", "all", "--status", "all"],
+    ));
+    assert_eq!(all_kinds.data.count, 1);
+    assert_eq!(all_kinds.data.items[0].cut.kind, "debt");
+
+    // One ledger yields one record: a re-run at a new wall-clock time must not stack.
+    let replay: SuccessEnvelope<AddData> = success(
+        &command()
+            .env("PAPERCUTS_NOW", "2026-08-11T04:05:06.000Z")
+            .arg("--file")
+            .arg(&file)
+            .args([
+                "add",
+                "--kind",
+                "debt",
+                "--owner",
+                "someone-else",
+                "--baseline-count",
+                "999",
+                "--path",
+                path,
+                "--agent",
+                "tester",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert!(!replay.data.changed);
+    assert_eq!(replay.data.record.id, record.id);
+    assert_eq!(
+        replay.data.record.baseline_count,
+        Some(714),
+        "first write wins"
+    );
+
+    let doctor: SuccessEnvelope<DoctorData> = success(&run_file(&file, &["doctor"]));
+    assert!(doctor.data.healthy, "{:?}", doctor.data.findings);
+}
+
+#[test]
+fn debt_requires_its_three_fields_and_refuses_debt_flags_on_cuts() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    let error = |args: &[&str], code: &str| {
+        let output = run_file(&file, args);
+        error(&output, 65, code);
+    };
+    error(
+        &[
+            "add",
+            "--kind",
+            "debt",
+            "--baseline-count",
+            "1",
+            "--path",
+            "p/x",
+            "--agent",
+            "tester",
+        ],
+        "invalid_input",
+    );
+    error(
+        &[
+            "add",
+            "--kind",
+            "debt",
+            "--owner",
+            "  ",
+            "--baseline-count",
+            "1",
+            "--path",
+            "p/x",
+            "--agent",
+            "tester",
+        ],
+        "invalid_input",
+    );
+    error(
+        &[
+            "add", "--kind", "debt", "--owner", "x", "--path", "p/x", "--agent", "tester",
+        ],
+        "invalid_input",
+    );
+    error(
+        &[
+            "add",
+            "--kind",
+            "debt",
+            "--owner",
+            "x",
+            "--baseline-count",
+            "1",
+            "--agent",
+            "tester",
+        ],
+        "invalid_input",
+    );
+    // Debt flags without --kind debt are a caller mistake, not a silent cut.
+    error(
+        &["add", "a cut", "--owner", "x", "--agent", "tester"],
+        "invalid_input",
+    );
+    assert!(!file.exists(), "no rejected invocation may create the log");
+}
+
+#[test]
+fn rebaseline_reopens_a_resolved_debt_and_is_debt_only() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    let debt: SuccessEnvelope<AddData> = success(&run_file(
+        &file,
+        &[
+            "add",
+            "--kind",
+            "debt",
+            "--owner",
+            "platform-maintainer",
+            "--baseline-count",
+            "714",
+            "--path",
+            "scripts/typecheck/pyright-baseline.json",
+            "--agent",
+            "tester",
+        ],
+    ));
+    let debt_id = debt.data.record.id;
+    let cut = add(&file, "a cut").data.record.id;
+
+    // Cuts have no ledger to re-measure, so the reopen channel must refuse them.
+    error(
+        &run_file(
+            &file,
+            &[
+                "rebaseline",
+                &cut,
+                "--baseline-count",
+                "5",
+                "--note",
+                "nope",
+            ],
+        ),
+        65,
+        "invalid_input",
+    );
+    // The note is required: a baseline move without an assessment is unauditable.
+    error(
+        &run_file(
+            &file,
+            &[
+                "rebaseline",
+                &debt_id,
+                "--baseline-count",
+                "5",
+                "--note",
+                "   ",
+            ],
+        ),
+        65,
+        "invalid_input",
+    );
+
+    let resolved: SuccessEnvelope<ResolveData> = success(&run_file(
+        &file,
+        &[
+            "resolve",
+            &debt_id,
+            "--reason",
+            "won't-fix",
+            "--note",
+            "external root cause; workaround documented",
+        ],
+    ));
+    assert_eq!(resolved.data.record.status, ItemStatus::Resolved);
+    let hidden: SuccessEnvelope<ListData> = success(&run_file(&file, &["list", "--kind", "debt"]));
+    assert_eq!(
+        hidden.data.count, 0,
+        "resolved debt leaves the default queue"
+    );
+
+    let rebaselined: SuccessEnvelope<RebaselineData> = success(&run_file(
+        &file,
+        &[
+            "rebaseline",
+            &debt_id,
+            "--baseline-count",
+            "735",
+            "--note",
+            "baseline grew back after new violations",
+        ],
+    ));
+    assert_eq!(rebaselined.data.rebaselined_now_ids, vec![debt_id.clone()]);
+    let record = &rebaselined.data.records[0];
+    assert_eq!(record.status, ItemStatus::Open);
+    assert!(record.resolution.is_none(), "reopen clears the resolution");
+    assert_eq!(record.cut.baseline_count, Some(735));
+
+    let visible: SuccessEnvelope<ListData> = success(&run_file(&file, &["list", "--kind", "debt"]));
+    assert_eq!(visible.data.count, 1);
+    assert_eq!(visible.data.items[0].cut.baseline_count, Some(735));
+
+    // A rebaseline to the count already declared changes nothing.
+    let same: SuccessEnvelope<RebaselineData> = success(&run_file(
+        &file,
+        &[
+            "rebaseline",
+            &debt_id,
+            "--baseline-count",
+            "735",
+            "--note",
+            "same count",
+        ],
+    ));
+    assert!(!same.data.changed);
+    assert_eq!(same.data.already_current_ids, vec![debt_id.clone()]);
+
+    let doctor: SuccessEnvelope<DoctorData> = success(&run_file(&file, &["doctor"]));
+    assert!(doctor.data.healthy, "{:?}", doctor.data.findings);
+}
+
+#[test]
+fn doctor_reports_independent_debt_findings() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    let debt: SuccessEnvelope<AddData> = success(&run_file(
+        &file,
+        &[
+            "add",
+            "--kind",
+            "debt",
+            "--owner",
+            "platform-maintainer",
+            "--baseline-count",
+            "714",
+            "--path",
+            "scripts/typecheck/pyright-baseline.json",
+            "--agent",
+            "tester",
+        ],
+    ));
+    let _ = debt;
+    let cut_id = add(&file, "a real cut").data.record.id;
+    let mut writer = OpenOptions::new().append(true).open(&file).unwrap();
+    // A debt whose ID does not derive from its path.
+    writeln!(
+        writer,
+        "{}",
+        json!({"kind":"debt","id":"pc_000000000001","ts":"2026-07-09T00:00:00.000Z","agent":"a","text":"x","tags":[],"severity":"minor","cwd":"/tmp","repo":null,"owner":"o","baseline_count":1,"path":"docs/other.md"})
+    )
+    .unwrap();
+    // A debt with several defects at once: each must surface, not just the first.
+    writeln!(
+        writer,
+        "{}",
+        json!({"kind":"debt","id":"pc_000000000002","ts":"2026-07-09T00:00:00.000Z","agent":"a","text":"y","tags":[],"severity":"minor","cwd":"/tmp","repo":null,"owner":"  ","path":"docs/z.md"})
+    )
+    .unwrap();
+    // A rebaseline pointing at a non-debt, and one pointing at nothing.
+    writeln!(
+        writer,
+        "{}",
+        json!({"kind":"rebaseline","id":cut_id,"ts":"2026-07-09T00:00:00.000Z","agent":"a","baseline_count":3,"note":"n"})
+    )
+    .unwrap();
+    writeln!(
+        writer,
+        "{}",
+        json!({"kind":"rebaseline","id":"pc_deadbeef0000","ts":"2026-07-09T00:00:00.000Z","agent":"a","baseline_count":3,"note":"n"})
+    )
+    .unwrap();
+    drop(writer);
+
+    let output = run_file(&file, &["doctor"]);
+    assert_eq!(output.status.code(), Some(1));
+    let envelope: SuccessEnvelope<DoctorData> = serde_json::from_slice(&output.stdout).unwrap();
+    let kinds: Vec<_> = envelope
+        .data
+        .findings
+        .iter()
+        .map(|finding| finding.kind.as_str())
+        .collect();
+    for kind in [
+        "id_conflict",
+        "debt_missing_owner",
+        "debt_missing_baseline_count",
+        "orphan_rebaseline",
+    ] {
+        assert!(kinds.contains(&kind), "missing {kind}: {kinds:?}");
+    }
+    // The rebaseline at a cut must be flagged, not silently accepted.
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| **kind == "orphan_rebaseline")
+            .count(),
+        2,
+        "{kinds:?}"
     );
 }

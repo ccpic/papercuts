@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0] - 2026-10-17
+
+### Added
+
+- New `debt` record kind for repository debt ledgers: `add --kind debt --owner <NAME> --baseline-count <N> --path <PATH>` files one record per ledger, with `path` as the record identity so migration re-runs are no-ops.
+- `list --kind cut|debt|all` (default `cut`, so debt stays invisible to existing consumers) and `list --owner <NAME>`; the triage projection now carries `owner`, `baseline_count`, and `path`.
+- New `rebaseline <ID> --baseline-count <N> --note <TEXT>` event: reopens a resolved debt with a fresh declared baseline, the only channel out of a terminal state. Debt-only; the note is required.
+- `doctor` reports debt-specific findings (`debt_missing_owner`, `debt_missing_path`, `debt_missing_baseline_count`, `orphan_rebaseline`) plus ID-vs-path conflicts, independently per defect.
+
+### Changed
+
+- Advance the machine contract to version 3 for the `debt` kind and the `rebaseline` event.
+- `baseline_count` is stored, never compared: ratchet verdicts stay in the owning repository's checker.
+
 ## [0.4.0] - 2026-08-14
 
 ### Added
