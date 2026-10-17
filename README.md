@@ -6,7 +6,7 @@ Agents hit friction constantly — dead-end tool calls, broken links, missing he
 
 ```
 $ papercuts add "yarn web:test with a root-relative path finds no files; the workspace test cwd is apps/web" --tag tooling
-{"ok":true,"data":{"changed":true,"record":{"kind":"cut","id":"pc_9f2c41d0a8b3","ts":"2026-07-09T21:14:03.412Z","agent":"claude-code","text":"yarn web:test with a root-relative path finds no files; the workspace test cwd is apps/web","tags":["tooling"],"severity":"minor",...}},"meta":{"contract":1,"file":"/repo/.papercuts.jsonl","agent_source":"detected"}}
+{"ok":true,"data":{"changed":true,"record":{"kind":"cut","id":"pc_9f2c41d0a8b3","ts":"2026-07-09T21:14:03.412Z","agent":"claude-code","text":"yarn web:test with a root-relative path finds no files; the workspace test cwd is apps/web","tags":["tooling"],"severity":"minor",...}},"meta":{"contract":2,"file":"/repo/.papercuts.jsonl","agent_source":"detected"}}
 ```
 
 The idea comes from [a tool Steve Ruiz built](https://x.com/steveruizok) for his own repos: once agents had a place to complain, they immediately surfaced real workflow defects — quoting bugs, wrong test working directories, YAML footguns — that they'd been eating silently for months.
@@ -22,21 +22,26 @@ cargo install papercuts
 Papercuts live in an **append-only JSONL file** — by default `.papercuts.jsonl` at your repo root, so every complaint shows up in `git diff` and travels with the repo. No server, no sync, no telemetry. The file is the product.
 
 ```bash
-papercuts add "text"            # file a papercut (also: papercuts log, or pipe stdin to add -)
-papercuts list                  # open papercuts, severity-first then newest, JSON envelope
-papercuts list --format md      # human review digest
-papercuts resolve pc_9f2c        # mark one fixed (unique ID prefix ok)
-papercuts resolve pc_9f2c pc_a81e # resolve several atomically
+papercuts add "text"                     # file a papercut (also: papercuts log, or pipe stdin to add -)
+papercuts list                           # open papercuts, severity-first then newest, JSON envelope
+papercuts list --projection triage       # compact backlog view for ranking
+papercuts list --id pc_9f2c41d0a8b3     # fetch exact records; --id is repeatable
+papercuts list --format md               # human review digest
+papercuts block pc_9f2c --note "waiting on upstream" # remove a genuine blocker from the open queue
+papercuts unblock pc_9f2c                # return a blocked cut to the open queue
+papercuts resolve pc_9f2c --reason fixed # append a terminal resolution (unique ID prefix ok)
+papercuts resolve pc_9f2c pc_a81e        # resolve several atomically
 papercuts add "tool failed" --cmd 'tool --flag' --exit 1 --stderr-file /tmp/stderr
 papercuts add "bad response" --evidence 'request_id=abc123'
-papercuts schema                # full machine contract — agents self-orient with this
-papercuts doctor                # validate the log file
+papercuts schema                         # full machine contract — agents self-orient with this
+papercuts doctor                         # validate the log file
 ```
 
 - **Agent-first contract**: stdout is data only; one JSON envelope per command; structured errors on stderr with stable codes, documented exit codes, and a paste-ready `suggested_fix`. `papercuts schema` returns the whole contract.
 - **Concurrency-safe**: multiple agents on one file are fine (advisory locking, atomic appends, self-healing torn lines).
 - **Deterministic**: content-addressed IDs, stable sort, reproducible-clock override for tests.
-- **Never rewrites history**: `resolve` appends an event; the log is a journal, not a database.
+- **Never rewrites history**: `block`, `unblock`, and terminal `resolve` operations append events; the log is a journal, not a database.
+- **Explicit lifecycle results**: mutation envelopes distinguish IDs changed now, already in target state, and dry-run candidates. Resolution reasons are `fixed`, `already-fixed`, `duplicate`, `false-observation`, or `obsolete`.
 - **Evidence is bounded and redacted**: `add` can attach a failed command (`--cmd`), exit status (`--exit`), UTF-8 stderr file (`--stderr-file`), or free-form note (`--evidence`). `--stderr-file` rejects non-regular files and inputs over 1 MiB before sanitized stderr is stored up to 4096 UTF-8 bytes. Redaction is best-effort, so never feed raw environment dumps.
 
 ## Give your agents the pen
@@ -52,9 +57,12 @@ misleading doc, a footgun config, a missing helper — file it before moving on:
     papercuts add "<what you hit and what would have prevented it>" --tag <area>
 
 Don't stop working; file it and push through. Severity: minor (default) for
-annoyances, major for time sinks, blocker for hard walls. Run `papercuts schema`
-once if you need the full contract. Attach `--cmd`, `--exit`, or `--stderr-file`
-when filing tool failures; never feed raw environment dumps.
+annoyances, major for time sinks, blocker for hard walls. Keep the returned ID:
+after a durable fix passes the original failing path, resolve it with a reason.
+Use `block` only for a confirmed external dependency, not as a substitute for
+repair. Run `papercuts schema` once if you need the full contract. Attach
+`--cmd`, `--exit`, or `--stderr-file` when filing tool failures; never feed raw
+environment dumps.
 ```
 
 Then periodically: `papercuts list --format md` and fix what your agents keep tripping over.
@@ -73,7 +81,7 @@ Duplicate lines after a merge are harmless — the fold is first-wins and `paper
 
 ## Contract
 
-Everything an agent needs is in `papercuts schema`: commands and flags with read-only/appends annotations, env vars (`PAPERCUTS_FILE`, `PAPERCUTS_AGENT`, `PAPERCUTS_NOW`), record shapes, error codes, and the exit-code dictionary (0 success · 2 usage · 65 bad input · 66 not found · 70 internal · 74 I/O · 75 lock timeout, retryable · 77 permission denied · 78 config). Empty results are exit 0, never errors.
+Everything an agent needs is in `papercuts schema`: contract version 2, commands and flags with read-only/appends annotations, env vars (`PAPERCUTS_FILE`, `PAPERCUTS_AGENT`, `PAPERCUTS_NOW`), record shapes, error codes, and the exit-code dictionary (0 success · 2 usage · 65 bad input · 66 not found · 70 internal · 74 I/O · 75 lock timeout, retryable · 77 permission denied · 78 config). Empty results are exit 0, never errors.
 
 ## License
 

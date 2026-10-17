@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
+pub const CONTRACT_VERSION: u8 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -63,8 +65,41 @@ pub struct Evidence {
     pub note: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResolutionReason {
+    #[default]
+    #[value(skip)]
+    Legacy,
+    Fixed,
+    AlreadyFixed,
+    Duplicate,
+    FalseObservation,
+    Obsolete,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolveRecord {
+    pub kind: String,
+    pub id: String,
+    pub ts: String,
+    pub agent: String,
+    #[serde(default)]
+    pub reason: ResolutionReason,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockRecord {
+    pub kind: String,
+    pub id: String,
+    pub ts: String,
+    pub agent: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnblockRecord {
     pub kind: String,
     pub id: String,
     pub ts: String,
@@ -74,6 +109,14 @@ pub struct ResolveRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resolution {
+    pub ts: String,
+    pub agent: String,
+    pub reason: ResolutionReason,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Blockage {
     pub ts: String,
     pub agent: String,
     pub note: Option<String>,
@@ -86,12 +129,15 @@ pub struct ListItem {
     pub status: ItemStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<Resolution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blockage: Option<Blockage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ItemStatus {
     Open,
+    Blocked,
     Resolved,
 }
 

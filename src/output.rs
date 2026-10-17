@@ -1,3 +1,4 @@
+use crate::CONTRACT_VERSION;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,7 +24,7 @@ impl Meta {
 impl Default for Meta {
     fn default() -> Self {
         Self {
-            contract: 1,
+            contract: CONTRACT_VERSION,
             file: None,
             agent_source: None,
             warnings: Vec::new(),

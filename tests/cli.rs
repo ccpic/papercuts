@@ -1,12 +1,13 @@
 use assert_cmd::Command;
 use papercuts::commands::add::AddData;
+use papercuts::commands::block::BlockData;
 use papercuts::commands::doctor::DoctorData;
-use papercuts::commands::list::ListData;
-use papercuts::commands::resolve::ResolveData;
-use papercuts::commands::resolve::ResolveManyData;
+use papercuts::commands::list::{ListData, TriageListData};
+use papercuts::commands::resolve::{ResolveData, ResolveManyData};
+use papercuts::commands::unblock::UnblockData;
 use papercuts::error::exit_code_map;
 use papercuts::output::{ErrorEnvelope, SuccessEnvelope};
-use papercuts::{ItemStatus, Severity, compute_id};
+use papercuts::{CONTRACT_VERSION, ItemStatus, ResolutionReason, Severity, compute_id};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -73,7 +74,7 @@ fn error(output: &std::process::Output, exit: i32, code: &str) -> ErrorEnvelope 
     assert!(!envelope.ok);
     assert_eq!(envelope.error.code, code);
     assert!(!envelope.error.suggested_fix.is_empty());
-    assert_eq!(envelope.meta.contract, 1);
+    assert_eq!(envelope.meta.contract, CONTRACT_VERSION);
     envelope
 }
 
@@ -994,7 +995,13 @@ fn evidence_and_resolve_response_shapes_are_exactly_compatible() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["changed", "record"]
+        [
+            "already_resolved_ids",
+            "changed",
+            "record",
+            "resolved_now_ids",
+            "would_resolve_ids"
+        ]
     );
     let one_record = one["data"]["record"].as_object().unwrap();
     assert_eq!(
@@ -1025,7 +1032,12 @@ fn evidence_and_resolve_response_shapes_are_exactly_compatible() {
     assert_eq!(one_record["status"], "resolved");
     assert_eq!(
         one_record["resolution"],
-        json!({"agent":"unknown","note":null,"ts":"2026-07-09T18:30:00.123Z"})
+        json!({
+            "agent":"unknown",
+            "note":null,
+            "reason":"fixed",
+            "ts":"2026-07-09T18:30:00.123Z"
+        })
     );
     let second = partial.data.record.id;
     let third: SuccessEnvelope<AddData> =
@@ -1041,7 +1053,13 @@ fn evidence_and_resolve_response_shapes_are_exactly_compatible() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["changed", "records"]
+        [
+            "already_resolved_ids",
+            "changed",
+            "records",
+            "resolved_now_ids",
+            "would_resolve_ids"
+        ]
     );
     let records = many["data"]["records"].as_array().unwrap();
     assert_eq!(records.len(), 2);
@@ -1056,6 +1074,7 @@ fn evidence_and_resolve_response_shapes_are_exactly_compatible() {
         assert_eq!(record["resolution"]["ts"], "2026-07-09T18:30:00.123Z");
         assert_eq!(record["resolution"]["agent"], "unknown");
         assert_eq!(record["resolution"]["note"], Value::Null);
+        assert_eq!(record["resolution"]["reason"], "fixed");
         match record["id"].as_str().unwrap() {
             id if id == second => {
                 assert_eq!(
@@ -1211,7 +1230,7 @@ fn every_command_success_envelope_deserializes() {
     assert_eq!(doctor.data.checked_lines, 2);
 
     let schema: SuccessEnvelope<Value> = success(&run(&["schema"]));
-    assert_eq!(schema.data["contract"], 1);
+    assert_eq!(schema.data["contract"], CONTRACT_VERSION);
     assert_eq!(schema.data["exit_codes"]["74"], "I/O error");
     assert_eq!(schema.data["commands"]["doctor"]["read_only"], true);
     assert!(
@@ -1222,7 +1241,7 @@ fn every_command_success_envelope_deserializes() {
     );
     assert_eq!(
         schema.data["commands"]["resolve"]["output"]["two_or_more"],
-        "{changed,records:[...]}; IDs are canonicalized, sorted, and duplicate inputs collapse; mixed already-resolved IDs warn with a sorted count/list"
+        "{changed,resolved_now_ids,already_resolved_ids,would_resolve_ids,records}; IDs are canonicalized, sorted, and duplicate inputs collapse"
     );
 
     let expected = serde_json::to_value(exit_code_map()).unwrap();
@@ -1362,6 +1381,72 @@ fn list_sorts_rfc3339_offsets_by_instant_not_text() {
 }
 
 #[test]
+fn list_exact_ids_and_triage_projection_are_bounded_and_strict() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    let first = add(&file, "first exact").data.record.id;
+    let second = add(&file, "second exact").data.record.id;
+
+    let output = run_file(
+        &file,
+        &[
+            "list",
+            "--id",
+            &first,
+            "--id",
+            &first,
+            "--projection",
+            "triage",
+        ],
+    );
+    let listed: SuccessEnvelope<TriageListData> = success(&output);
+    assert_eq!(listed.data.count, 1);
+    assert_eq!(listed.data.total, 1);
+    assert!(!listed.data.truncated);
+    assert_eq!(listed.data.items[0].id, first);
+    assert_eq!(listed.data.items[0].text, "first exact");
+    assert_eq!(listed.data.items[0].status, ItemStatus::Open);
+
+    let raw: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        raw["data"]["items"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [
+            "cwd", "id", "repo", "severity", "status", "tags", "text", "ts"
+        ]
+    );
+    assert!(raw["data"]["items"][0].get("agent").is_none());
+    assert!(raw["data"]["items"][0].get("evidence").is_none());
+
+    let missing: SuccessEnvelope<TriageListData> = success(&run_file(
+        &file,
+        &["list", "--id", "pc_000000000000", "--projection", "triage"],
+    ));
+    assert!(missing.data.items.is_empty());
+    assert!(
+        missing
+            .meta
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("no papercuts matched"))
+    );
+    error(
+        &run_file(&file, &["list", "--id", &second.to_ascii_uppercase()]),
+        2,
+        "invalid_argument",
+    );
+    error(
+        &run_file(&file, &["list", "--format", "md", "--projection", "triage"]),
+        2,
+        "invalid_argument",
+    );
+}
+
+#[test]
 fn resolve_prefix_errors_and_idempotence_are_structured() {
     let temp = TempDir::new().unwrap();
     let file = temp.path().join("cuts.jsonl");
@@ -1373,10 +1458,26 @@ fn resolve_prefix_errors_and_idempotence_are_structured() {
         &["resolve", &prefix.to_ascii_uppercase(), "--agent", "fixer"],
     ));
     assert!(first.data.changed);
+    assert_eq!(
+        first.data.resolved_now_ids.as_slice(),
+        std::slice::from_ref(&id)
+    );
+    assert!(first.data.already_resolved_ids.is_empty());
+    assert!(first.data.would_resolve_ids.is_empty());
+    assert_eq!(
+        first.data.record.resolution.as_ref().unwrap().reason,
+        ResolutionReason::Fixed
+    );
     let second: SuccessEnvelope<ResolveData> =
         success(&run_file(&file, &["resolve", &id, "--agent", "fixer"]));
     assert!(!second.data.changed);
     assert_eq!(second.meta.warnings, ["already resolved"]);
+    assert!(second.data.resolved_now_ids.is_empty());
+    assert_eq!(
+        second.data.already_resolved_ids.as_slice(),
+        std::slice::from_ref(&id)
+    );
+    assert!(second.data.would_resolve_ids.is_empty());
 
     error(&run_file(&file, &["resolve", "abc"]), 2, "invalid_argument");
     let unknown = error(&run_file(&file, &["resolve", "deadbeef"]), 66, "not_found");
@@ -1424,6 +1525,210 @@ fn resolve_prefix_errors_and_idempotence_are_structured() {
         envelope.error.details["candidates"],
         json!(["pc_abcd00000000", "pc_abcd11111111"])
     );
+}
+
+#[test]
+fn block_unblock_and_resolve_form_an_atomic_terminal_lifecycle() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    let first = add(&file, "waiting first").data.record.id;
+    let second = add(&file, "waiting second").data.record.id;
+    let mut expected = vec![first.clone(), second.clone()];
+    expected.sort();
+
+    let blocked: SuccessEnvelope<BlockData> = success(&run_file(
+        &file,
+        &[
+            "block",
+            &second,
+            &first,
+            "--agent",
+            "triager",
+            "--note",
+            "external dependency",
+        ],
+    ));
+    assert!(blocked.data.changed);
+    assert_eq!(blocked.data.blocked_now_ids, expected);
+    assert!(blocked.data.already_blocked_ids.is_empty());
+    assert!(blocked.data.would_block_ids.is_empty());
+    assert!(blocked.data.records.iter().all(|record| {
+        record.status == ItemStatus::Blocked
+            && record.blockage.as_ref().is_some_and(|blockage| {
+                blockage.agent == "triager"
+                    && blockage.note.as_deref() == Some("external dependency")
+            })
+    }));
+    assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 4);
+
+    let open: SuccessEnvelope<ListData> = success(&run_file(&file, &["list"]));
+    assert!(open.data.items.is_empty());
+    let blocked_list: SuccessEnvelope<ListData> =
+        success(&run_file(&file, &["list", "--status", "blocked"]));
+    assert_eq!(blocked_list.data.items.len(), 2);
+
+    let repeated: SuccessEnvelope<BlockData> =
+        success(&run_file(&file, &["block", &first, "--agent", "triager"]));
+    assert!(!repeated.data.changed);
+    assert_eq!(
+        repeated.data.already_blocked_ids.as_slice(),
+        std::slice::from_ref(&first)
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 4);
+
+    let preview: SuccessEnvelope<UnblockData> = success(&run_file(
+        &file,
+        &[
+            "unblock",
+            &first,
+            "--agent",
+            "triager",
+            "--note",
+            "dependency ready",
+            "--dry-run",
+        ],
+    ));
+    assert!(!preview.data.changed);
+    assert_eq!(
+        preview.data.would_unblock_ids.as_slice(),
+        std::slice::from_ref(&first)
+    );
+    assert_eq!(preview.data.records[0].status, ItemStatus::Open);
+    assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 4);
+
+    let unblocked: SuccessEnvelope<UnblockData> = success(&run_file(
+        &file,
+        &[
+            "unblock",
+            &first,
+            "--agent",
+            "triager",
+            "--note",
+            "dependency ready",
+        ],
+    ));
+    assert!(unblocked.data.changed);
+    assert_eq!(
+        unblocked.data.unblocked_now_ids.as_slice(),
+        std::slice::from_ref(&first)
+    );
+    assert!(unblocked.data.already_open_ids.is_empty());
+    assert!(unblocked.data.would_unblock_ids.is_empty());
+    assert_eq!(unblocked.data.records[0].status, ItemStatus::Open);
+    assert!(unblocked.data.records[0].blockage.is_none());
+
+    let resolved: SuccessEnvelope<ResolveData> = success(&run_file(
+        &file,
+        &[
+            "resolve",
+            &second,
+            "--agent",
+            "triager",
+            "--reason",
+            "obsolete",
+            "--note",
+            "upstream removed",
+        ],
+    ));
+    assert!(resolved.data.changed);
+    assert_eq!(
+        resolved.data.resolved_now_ids.as_slice(),
+        std::slice::from_ref(&second)
+    );
+    assert_eq!(
+        resolved.data.record.resolution.as_ref().unwrap().reason,
+        ResolutionReason::Obsolete
+    );
+    assert!(resolved.data.record.blockage.is_none());
+
+    let before = std::fs::read(&file).unwrap();
+    error(
+        &run_file(&file, &["block", &first, &second, "--agent", "triager"]),
+        65,
+        "invalid_input",
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+
+    let all: SuccessEnvelope<ListData> = success(&run_file(&file, &["list", "--status", "all"]));
+    assert_eq!(
+        all.data
+            .items
+            .iter()
+            .find(|item| item.cut.id == first)
+            .unwrap()
+            .status,
+        ItemStatus::Open
+    );
+    assert_eq!(
+        all.data
+            .items
+            .iter()
+            .find(|item| item.cut.id == second)
+            .unwrap()
+            .status,
+        ItemStatus::Resolved
+    );
+    let doctor: SuccessEnvelope<DoctorData> = success(&run_file(&file, &["doctor"]));
+    assert!(doctor.data.healthy);
+    assert_eq!(doctor.data.checked_lines, 6);
+}
+
+#[test]
+fn concurrent_blocks_and_unblocks_append_once_per_transition() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    let id = add(&file, "concurrent lifecycle").data.record.id;
+
+    let barrier = Arc::new(Barrier::new(8));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let file = file.clone();
+            let id = id.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                let output = run_file(&file, &["block", &id, "--agent", "race"]);
+                let envelope: SuccessEnvelope<BlockData> = success(&output);
+                envelope.data.changed
+            })
+        })
+        .collect();
+    assert_eq!(
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|changed| *changed)
+            .count(),
+        1
+    );
+
+    let barrier = Arc::new(Barrier::new(8));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let file = file.clone();
+            let id = id.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                let output = run_file(&file, &["unblock", &id, "--agent", "race"]);
+                let envelope: SuccessEnvelope<UnblockData> = success(&output);
+                envelope.data.changed
+            })
+        })
+        .collect();
+    assert_eq!(
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|changed| *changed)
+            .count(),
+        1
+    );
+
+    let listed: SuccessEnvelope<ListData> = success(&run_file(&file, &["list"]));
+    assert_eq!(listed.data.items.len(), 1);
+    assert_eq!(listed.data.items[0].status, ItemStatus::Open);
+    assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 3);
 }
 
 #[test]
@@ -1491,11 +1796,12 @@ fn multi_resolve_is_atomic_deterministic_and_idempotent() {
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["agent", "id", "kind", "note", "ts"]
+            ["agent", "id", "kind", "note", "reason", "ts"]
         );
         assert_eq!(event["ts"], "2026-07-09T18:30:00.123Z");
         assert_eq!(event["agent"], "fixer");
         assert_eq!(event["note"], "batch");
+        assert_eq!(event["reason"], "fixed");
     }
     let listed: SuccessEnvelope<ListData> =
         success(&run_file(&file, &["list", "--status", "resolved"]));
@@ -1670,6 +1976,9 @@ fn structured_error_exit_matrix_and_help_exceptions() {
         .unwrap();
     error(&invalid_utf8, 65, "invalid_input");
     let directory_error = run_file(temp.path(), &["list"]);
+    #[cfg(windows)]
+    error(&directory_error, 77, "permission_denied");
+    #[cfg(not(windows))]
     error(&directory_error, 74, "io_error");
 
     let help = run(&["--help"]);
@@ -1986,10 +2295,14 @@ fn discovery_precedence_virtual_empty_and_git_file_root() {
             .output()
             .unwrap(),
     );
-    let canonical_root = root.canonicalize().unwrap();
+    let discovered_file = Path::new(walk.meta.file.as_deref().unwrap());
     assert_eq!(
-        walk.meta.file.as_deref(),
-        Some(canonical_root.join(".papercuts.jsonl").to_str().unwrap())
+        discovered_file.parent().unwrap().canonicalize().unwrap(),
+        root.canonicalize().unwrap()
+    );
+    assert_eq!(
+        discovered_file.file_name().unwrap(),
+        std::ffi::OsStr::new(".papercuts.jsonl")
     );
     let empty_env: SuccessEnvelope<AddData> = success(
         &command()
@@ -2212,6 +2525,7 @@ fn env_papercuts_file_nonexistent_returns_not_found() {
 #[test]
 fn relative_file_resolves_against_cwd() {
     let temp = TempDir::new().unwrap();
+    std::fs::create_dir(temp.path().join("rel")).unwrap();
     let output = command()
         .current_dir(temp.path())
         .arg("--file")
@@ -2220,11 +2534,14 @@ fn relative_file_resolves_against_cwd() {
         .output()
         .unwrap();
     let envelope: SuccessEnvelope<AddData> = success(&output);
-    let temp_canonical = temp.path().canonicalize().unwrap();
-    assert!(
-        Path::new(envelope.meta.file.as_deref().unwrap()).starts_with(&temp_canonical),
-        "meta.file = {:?}",
-        envelope.meta.file
+    let resolved_file = Path::new(envelope.meta.file.as_deref().unwrap());
+    assert_eq!(
+        resolved_file.parent().unwrap().canonicalize().unwrap(),
+        temp.path().join("rel").canonicalize().unwrap()
+    );
+    assert_eq!(
+        resolved_file.file_name().unwrap(),
+        std::ffi::OsStr::new("path.jsonl")
     );
 }
 

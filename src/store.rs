@@ -1,5 +1,8 @@
 use crate::error::{AppError, AppResult};
-use crate::{CutRecord, ItemStatus, ListItem, Resolution, ResolveRecord};
+use crate::{
+    BlockRecord, Blockage, CutRecord, ItemStatus, ListItem, Resolution, ResolveRecord,
+    UnblockRecord,
+};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
@@ -31,7 +34,8 @@ struct WarningCounts {
     unknown: usize,
     duplicate_cuts: usize,
     duplicate_resolves: usize,
-    orphans: usize,
+    orphan_resolves: usize,
+    orphan_blocks: usize,
 }
 
 pub fn discover(flag: Option<PathBuf>) -> AppResult<ResolvedFile> {
@@ -222,9 +226,15 @@ fn append_bytes_with(
         bytes.push(b'\n');
     }
     bytes.extend_from_slice(record_bytes);
-    // If the write fails, roll back to the pre-write length; if rollback also fails, surface both.
+    // A Windows append-only handle can report successful truncation while
+    // retaining partial bytes. Reopen the locked path with ordinary write
+    // access to restore the pre-write length.
     if let Err(error) = write(file, &bytes) {
-        if let Err(rollback) = file.set_len(original_len) {
+        if let Err(rollback) = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|rollback| rollback.set_len(original_len))
+        {
             return Err(AppError {
                 code: "io_error",
                 message: format!(
@@ -244,6 +254,7 @@ fn append_bytes_with(
 pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
     let mut cuts = BTreeMap::<String, CutRecord>::new();
     let mut resolves = HashMap::<String, ResolveRecord>::new();
+    let mut blockages = HashMap::<String, Option<BlockRecord>>::new();
     let mut counts = WarningCounts::default();
     let complete_len = if bytes.is_empty() || bytes.ends_with(b"\n") {
         bytes.len()
@@ -295,13 +306,38 @@ pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
                 }
                 Err(_) => counts.malformed += 1,
             },
+            Some("block") => match serde_json::from_value::<BlockRecord>(value) {
+                Ok(block) => {
+                    if block.ts.parse::<jiff::Timestamp>().is_err() {
+                        counts.malformed += 1;
+                        continue;
+                    }
+                    blockages.insert(block.id.clone(), Some(block));
+                }
+                Err(_) => counts.malformed += 1,
+            },
+            Some("unblock") => match serde_json::from_value::<UnblockRecord>(value) {
+                Ok(unblock) => {
+                    if unblock.ts.parse::<jiff::Timestamp>().is_err() {
+                        counts.malformed += 1;
+                        continue;
+                    }
+                    blockages.insert(unblock.id, None);
+                }
+                Err(_) => counts.malformed += 1,
+            },
             _ => counts.unknown += 1,
         }
     }
 
     for id in resolves.keys() {
         if !cuts.contains_key(id) {
-            counts.orphans += 1;
+            counts.orphan_resolves += 1;
+        }
+    }
+    for id in blockages.keys() {
+        if !cuts.contains_key(id) {
+            counts.orphan_blocks += 1;
         }
     }
     let mut items: Vec<_> = cuts
@@ -310,16 +346,32 @@ pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
             let resolution = resolves.get(&cut.id).map(|resolve| Resolution {
                 ts: resolve.ts.clone(),
                 agent: resolve.agent.clone(),
+                reason: resolve.reason,
                 note: resolve.note.clone(),
             });
+            let blockage = if resolution.is_none() {
+                blockages
+                    .get(&cut.id)
+                    .and_then(|block| block.as_ref())
+                    .map(|block| Blockage {
+                        ts: block.ts.clone(),
+                        agent: block.agent.clone(),
+                        note: block.note.clone(),
+                    })
+            } else {
+                None
+            };
             ListItem {
                 status: if resolution.is_some() {
                     ItemStatus::Resolved
+                } else if blockage.is_some() {
+                    ItemStatus::Blocked
                 } else {
                     ItemStatus::Open
                 },
                 cut,
                 resolution,
+                blockage,
             }
         })
         .collect();
@@ -345,7 +397,8 @@ pub fn fold_bytes(bytes: &[u8]) -> FoldResult {
         counts.duplicate_resolves,
         "duplicate resolve",
     );
-    warning(&mut warnings, counts.orphans, "orphan resolve");
+    warning(&mut warnings, counts.orphan_resolves, "orphan resolve");
+    warning(&mut warnings, counts.orphan_blocks, "orphan block event");
     FoldResult { items, warnings }
 }
 

@@ -1,4 +1,4 @@
-use crate::Severity;
+use crate::{ResolutionReason, Severity};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -30,6 +30,8 @@ pub enum Command {
     Add(AddArgs),
     List(ListArgs),
     Resolve(ResolveArgs),
+    Block(BlockArgs),
+    Unblock(UnblockArgs),
     Schema {
         #[arg(value_enum, default_value_t = SchemaTarget::All)]
         target: SchemaTarget,
@@ -77,6 +79,8 @@ pub struct AddArgs {
 pub struct ListArgs {
     #[arg(long, value_enum, default_value_t = StatusFilter::Open)]
     pub status: StatusFilter,
+    #[arg(long = "id", value_name = "CANONICAL_ID")]
+    pub ids: Vec<String>,
     #[arg(long)]
     pub agent: Option<String>,
     #[arg(long)]
@@ -89,10 +93,48 @@ pub struct ListArgs {
     pub limit: usize,
     #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
     pub format: OutputFormat,
+    #[arg(long, value_enum, default_value_t = ListProjection::Full)]
+    pub projection: ListProjection,
 }
 
 #[derive(Debug, Args)]
 pub struct ResolveArgs {
+    #[arg(
+        value_name = "ID",
+        num_args = 1..,
+        required = true,
+        help = "One or more IDs or unique prefixes"
+    )]
+    pub ids: Vec<String>,
+    #[arg(long, value_enum, default_value_t = ResolutionReason::Fixed)]
+    pub reason: ResolutionReason,
+    #[arg(long, allow_hyphen_values = true)]
+    pub note: Option<String>,
+    #[arg(long)]
+    pub agent: Option<String>,
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct BlockArgs {
+    #[arg(
+        value_name = "ID",
+        num_args = 1..,
+        required = true,
+        help = "One or more IDs or unique prefixes"
+    )]
+    pub ids: Vec<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    pub note: Option<String>,
+    #[arg(long)]
+    pub agent: Option<String>,
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct UnblockArgs {
     #[arg(
         value_name = "ID",
         num_args = 1..,
@@ -112,6 +154,7 @@ pub struct ResolveArgs {
 pub enum StatusFilter {
     Open,
     Resolved,
+    Blocked,
     All,
 }
 
@@ -119,6 +162,12 @@ pub enum StatusFilter {
 pub enum OutputFormat {
     Json,
     Md,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ListProjection {
+    Full,
+    Triage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -152,6 +201,8 @@ mod tests {
         assert_eq!(args.status, StatusFilter::Open);
         assert_eq!(args.limit, 50);
         assert_eq!(args.format, OutputFormat::Json);
+        assert!(args.ids.is_empty());
+        assert_eq!(args.projection, ListProjection::Full);
     }
 
     #[test]
@@ -159,6 +210,11 @@ mod tests {
         assert!(Cli::try_parse_from(["papercuts", "list", "--format", "jsonl"]).is_err());
         assert!(Cli::try_parse_from(["papercuts", "add", "x", "--severity", "critical"]).is_err());
         assert!(Cli::try_parse_from(["papercuts", "resolve"]).is_err());
+        assert!(Cli::try_parse_from(["papercuts", "block"]).is_err());
+        assert!(Cli::try_parse_from(["papercuts", "unblock"]).is_err());
+        assert!(
+            Cli::try_parse_from(["papercuts", "resolve", "abcd", "--reason", "legacy"]).is_err()
+        );
         assert!(Cli::try_parse_from(["papercuts"]).is_err());
     }
 
@@ -168,6 +224,8 @@ mod tests {
             vec!["papercuts", "add", "-"],
             vec!["papercuts", "list", "--status", "all"],
             vec!["papercuts", "resolve", "abcd"],
+            vec!["papercuts", "block", "abcd"],
+            vec!["papercuts", "unblock", "abcd"],
             vec!["papercuts", "schema", "record"],
             vec!["papercuts", "doctor"],
         ] {
@@ -210,6 +268,7 @@ mod tests {
             panic!("expected resolve")
         };
         assert_eq!(args.note.as_deref(), Some("--retry after timeout"));
+        assert_eq!(args.reason, ResolutionReason::Fixed);
         assert_eq!(args.agent.as_deref(), Some("fixer"));
     }
 }

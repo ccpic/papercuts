@@ -1,8 +1,9 @@
-use crate::cli::{ListArgs, OutputFormat, StatusFilter};
+use super::ids;
+use crate::cli::{ListArgs, ListProjection, OutputFormat, StatusFilter};
 use crate::error::{AppError, AppResult};
 use crate::output::{self, Meta};
 use crate::store;
-use crate::{ItemStatus, ListItem, Severity, parse_since};
+use crate::{Blockage, ItemStatus, ListItem, Severity, parse_since};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -16,7 +17,52 @@ pub struct ListData {
     pub truncated: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TriageListData {
+    pub items: Vec<TriageItem>,
+    pub count: usize,
+    pub total: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TriageItem {
+    pub id: String,
+    pub ts: String,
+    pub text: String,
+    pub tags: Vec<String>,
+    pub severity: Severity,
+    pub cwd: String,
+    pub repo: Option<String>,
+    pub status: ItemStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blockage: Option<Blockage>,
+}
+
+impl From<ListItem> for TriageItem {
+    fn from(item: ListItem) -> Self {
+        Self {
+            id: item.cut.id,
+            ts: item.cut.ts,
+            text: item.cut.text,
+            tags: item.cut.tags,
+            severity: item.cut.severity,
+            cwd: item.cut.cwd,
+            repo: item.cut.repo,
+            status: item.status,
+            blockage: item.blockage,
+        }
+    }
+}
+
 pub fn run(args: ListArgs, file: Option<PathBuf>, pretty: bool, now: Timestamp) -> AppResult<i32> {
+    if args.format == OutputFormat::Md && args.projection == ListProjection::Triage {
+        return Err(AppError::invalid_argument(
+            "--projection triage is only available with --format json",
+            "Use `--format json --projection triage` or omit --projection for Markdown.",
+        ));
+    }
+    let ids = ids::canonical_ids(&args.ids)?;
     let resolved = store::discover(file)?;
     let mut warnings = Vec::new();
     let folded = match store::with_shared(&resolved.path, |log| {
@@ -47,9 +93,11 @@ pub fn run(args: ListArgs, file: Option<PathBuf>, pretty: bool, now: Timestamp) 
         .into_iter()
         .filter(|item| match args.status {
             StatusFilter::Open => item.status == ItemStatus::Open,
+            StatusFilter::Blocked => item.status == ItemStatus::Blocked,
             StatusFilter::Resolved => item.status == ItemStatus::Resolved,
             StatusFilter::All => true,
         })
+        .filter(|item| ids.is_empty() || ids.contains(&item.cut.id))
         .filter(|item| {
             args.agent
                 .as_ref()
@@ -75,23 +123,40 @@ pub fn run(args: ListArgs, file: Option<PathBuf>, pretty: bool, now: Timestamp) 
         .collect();
     let total = items.len();
     items.truncate(args.limit);
-    let data = ListData {
-        count: items.len(),
-        total,
-        truncated: total > items.len(),
-        items,
-    };
-    if data.items.is_empty() {
+    let count = items.len();
+    let truncated = total > count;
+    if items.is_empty() {
         warnings.push("no papercuts matched; try --status all or broader filters".into());
     }
     if args.format == OutputFormat::Md {
-        write_markdown(&data.items, &warnings)?;
+        write_markdown(&items, &warnings)?;
     } else {
         let mut meta = Meta::new();
         meta.file = Some(resolved.path.to_string_lossy().into_owned());
         meta.warnings = warnings;
-        output::write_success(data, pretty, meta)
-            .map_err(|error| AppError::from_io(error, std::path::Path::new("stdout")))?;
+        match args.projection {
+            ListProjection::Full => output::write_success(
+                ListData {
+                    items,
+                    count,
+                    total,
+                    truncated,
+                },
+                pretty,
+                meta,
+            ),
+            ListProjection::Triage => output::write_success(
+                TriageListData {
+                    items: items.into_iter().map(TriageItem::from).collect(),
+                    count,
+                    total,
+                    truncated,
+                },
+                pretty,
+                meta,
+            ),
+        }
+        .map_err(|error| AppError::from_io(error, std::path::Path::new("stdout")))?;
     }
     Ok(0)
 }

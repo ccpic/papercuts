@@ -1,7 +1,7 @@
 use crate::error::{AppError, AppResult};
 use crate::output::{self, Meta};
 use crate::store;
-use crate::{CutRecord, ResolveRecord, compute_id};
+use crate::{BlockRecord, CutRecord, ResolveRecord, UnblockRecord, compute_id};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -84,6 +84,8 @@ fn inspect(bytes: &[u8]) -> DoctorData {
     let mut cuts = HashMap::<String, Vec<u8>>::new();
     let mut cut_ids = HashSet::new();
     let mut resolves = Vec::<(usize, String)>::new();
+    let mut blocks = Vec::<(usize, String)>::new();
+    let mut unblocks = Vec::<(usize, String)>::new();
     let mut checked_lines = 0;
     let torn = !bytes.is_empty() && !bytes.ends_with(b"\n");
     let line_count = bytes.split(|byte| *byte == b'\n').count();
@@ -187,6 +189,42 @@ fn inspect(bytes: &[u8]) -> DoctorData {
                     message: format!("invalid resolve record: {error}"),
                 }),
             },
+            Some("block") => match serde_json::from_value::<BlockRecord>(value) {
+                Ok(block) => {
+                    if block.ts.parse::<jiff::Timestamp>().is_err() {
+                        findings.push(Finding {
+                            line,
+                            kind: "malformed".into(),
+                            message: "block ts is not a full RFC3339 timestamp".into(),
+                        });
+                        continue;
+                    }
+                    blocks.push((line, block.id));
+                }
+                Err(error) => findings.push(Finding {
+                    line,
+                    kind: "malformed".into(),
+                    message: format!("invalid block record: {error}"),
+                }),
+            },
+            Some("unblock") => match serde_json::from_value::<UnblockRecord>(value) {
+                Ok(unblock) => {
+                    if unblock.ts.parse::<jiff::Timestamp>().is_err() {
+                        findings.push(Finding {
+                            line,
+                            kind: "malformed".into(),
+                            message: "unblock ts is not a full RFC3339 timestamp".into(),
+                        });
+                        continue;
+                    }
+                    unblocks.push((line, unblock.id));
+                }
+                Err(error) => findings.push(Finding {
+                    line,
+                    kind: "malformed".into(),
+                    message: format!("invalid unblock record: {error}"),
+                }),
+            },
             Some(kind) => findings.push(Finding {
                 line,
                 kind: "unknown_kind".into(),
@@ -205,6 +243,24 @@ fn inspect(bytes: &[u8]) -> DoctorData {
                 line,
                 kind: "orphan_resolve".into(),
                 message: format!("resolve references unknown cut {id}"),
+            });
+        }
+    }
+    for (line, id) in blocks {
+        if !cut_ids.contains(&id) {
+            findings.push(Finding {
+                line,
+                kind: "orphan_block".into(),
+                message: format!("block references unknown cut {id}"),
+            });
+        }
+    }
+    for (line, id) in unblocks {
+        if !cut_ids.contains(&id) {
+            findings.push(Finding {
+                line,
+                kind: "orphan_unblock".into(),
+                message: format!("unblock references unknown cut {id}"),
             });
         }
     }

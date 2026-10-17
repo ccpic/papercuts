@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.0] - 2026-08-14
+
+### Added
+
+- Filter `list` by repeatable full canonical IDs and request a compact JSON triage projection.
+- Move cuts between `open` and `blocked` with atomic, idempotent `block` and `unblock` commands.
+- Record terminal resolution reasons: `fixed`, `already-fixed`, `duplicate`, `false-observation`, or `obsolete`.
+- Return explicit changed-now, already-in-state, and dry-run ID sets from lifecycle mutations.
+
+### Changed
+
+- Advance the machine contract to version 2 for lifecycle states, events, and mutation output shapes.
+- Treat resolved state as terminal while allowing blocked cuts to resolve directly.
+
+### Fixed
+
+- Restore the original log length after a partial append failure on Windows by reopening the locked path with ordinary write access.
+
 ## [0.2.0] - 2026-07-16
 
 ### Added
@@ -26,5 +44,6 @@
 
 - Initial release.
 
+[0.3.0]: https://github.com/treygoff24/papercuts/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/treygoff24/papercuts/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/treygoff24/papercuts/releases/tag/v0.1.0
