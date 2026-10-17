@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.0] - 2026-08-14
+
+### Added
+
+- New terminal resolution reason `won't-fix` for records confirmed real but deliberately not repaired (one-off/environment-specific facts, cost exceeding benefit, or unchangeable external root cause).
+
 ## [0.3.0] - 2026-08-14
 
 ### Added

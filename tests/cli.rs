@@ -315,6 +315,50 @@ fn leading_hyphen_evidence_and_resolve_note_work_through_binary() {
 }
 
 #[test]
+fn wont_fix_resolves_with_structured_reason_and_note() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("cuts.jsonl");
+    let added = add(&file, "one-off fact; not worth a durable change");
+
+    let resolved: SuccessEnvelope<ResolveData> = success(&run_file(
+        &file,
+        &[
+            "resolve",
+            &added.data.record.id,
+            "--reason",
+            "won't-fix",
+            "--note",
+            "environment-specific one-off; cost exceeds benefit",
+        ],
+    ));
+    assert!(resolved.data.changed);
+    assert_eq!(
+        resolved.data.resolved_now_ids.as_slice(),
+        std::slice::from_ref(&added.data.record.id)
+    );
+    assert!(resolved.data.already_resolved_ids.is_empty());
+    let resolution = resolved.data.record.resolution.unwrap();
+    assert_eq!(resolution.reason, ResolutionReason::WontFix);
+    assert_eq!(
+        resolution.note.as_deref(),
+        Some("environment-specific one-off; cost exceeds benefit")
+    );
+
+    let all: SuccessEnvelope<ListData> = success(&run_file(&file, &["list", "--status", "all"]));
+    let item = all
+        .data
+        .items
+        .iter()
+        .find(|item| item.cut.id == added.data.record.id)
+        .unwrap();
+    assert_eq!(item.status, ItemStatus::Resolved);
+    assert_eq!(
+        item.resolution.as_ref().unwrap().reason,
+        ResolutionReason::WontFix
+    );
+}
+
+#[test]
 fn evidence_redaction_handles_boundary_headers_unicode_json_and_cli_options() {
     let temp = TempDir::new().unwrap();
     let file = temp.path().join("cuts.jsonl");

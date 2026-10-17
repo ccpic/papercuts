@@ -76,6 +76,10 @@ pub enum ResolutionReason {
     Duplicate,
     FalseObservation,
     Obsolete,
+    /// 有意不修:记录真实存在、需求仍有效,但评估后决定不修复。
+    #[serde(rename = "won't-fix")]
+    #[value(name = "won't-fix")]
+    WontFix,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 # papercuts — design doc
 
-2026-07-09. Coordinator-authored. Status: r5 — amended for the contract v2 lifecycle. See Amendments for full triage provenance.
+2026-07-09. Coordinator-authored. Status: r6 — amended for the won't-fix closure reason. See Amendments for full triage provenance.
 
 ## Thesis and provenance
 
@@ -55,7 +55,7 @@ Global flags: `--file <PATH>` (explicit log file, overrides discovery; relative 
 
 ### `resolve`
 
-- `papercuts resolve <ID>... [--reason fixed|already-fixed|duplicate|false-observation|obsolete] [--note <TEXT>] [--agent <NAME>] [--dry-run]`. Resolution is terminal. Both open and blocked cuts may resolve directly; any active blockage is cleared in materialized output.
+- `papercuts resolve <ID>... [--reason fixed|already-fixed|duplicate|false-observation|obsolete|won't-fix] [--note <TEXT>] [--agent <NAME>] [--dry-run]`. Resolution is terminal. Both open and blocked cuts may resolve directly; any active blockage is cleared in materialized output. `won't-fix` closes records confirmed real but deliberately not repaired (one-off/environment-specific facts, repair cost exceeding benefit, or an unchangeable external root cause) and must carry a note stating the assessment.
 - Every response separates `resolved_now_ids`, `already_resolved_ids`, and `would_resolve_ids`; `changed` means an event was appended by this invocation. One ID returns `record`; two or more IDs return `records` in canonical ID order, with duplicate inputs collapsed.
 - ID syntax normalization and format validation may happen before discovery and locking. All state-dependent ID/prefix matching, status checks, and append decisions run under one exclusive lock before any event is appended. Any invalid, ambiguous, or missing ID aborts the whole command with no partial append.
 - The existence/status check and append run inside one exclusive-lock critical section — two racing resolves of the same cut yield one `changed:true` and one already-resolved result.
@@ -220,6 +220,10 @@ Second decorrelated review: 1 blocker, 12 major, 1 minor. Triage:
 Wave 2 adds optional cut evidence without changing the v1 identity or fold rules. A cut may carry `evidence` with optional `cmd`, integer `exit`, `stderr`, and `note` fields; absent fields are omitted during serialization, and stderr is read and redacted in full before its sanitized value is capped at 4096 valid UTF-8 bytes. To keep memory bounded, `--stderr-file` rejects regular files over 1 MiB rather than raw-truncating them before redaction. On Unix it opens the path nonblocking, then validates metadata from that opened handle; symlinks therefore resolve to a regular-file handle when accepted, while a FIFO, device, directory, or a symlink resolving to one is rejected. Evidence strings pass a deterministic best-effort redactor for assignment/header forms involving key, token, secret, password, authorization, and bearer, plus long high-entropy token shapes. It preserves structurally obvious paths and URLs, including repository-relative paths and schemeless hostnames, but this remains heuristic and does not make raw environment dumps safe to submit.
 
 Evidence is not included in the content-addressed ID. Duplicate cut events remain first-cut-wins, and duplicate-ID `add` returns the first record with a `duplicate_cut` warning stating that later evidence was not stored. Resolve events remain first-resolve-wins. Under the then-current contract v1, multi-ID `resolve` normalized and format-validated arguments before discovery and locking, performed state-dependent matching and append decisions under one exclusive lock, returned `{changed,record}` for one ID and `{changed,records:[...]}` for two or more, and appended nothing on validation failure. Contract v2 supersedes those response shapes below.
+
+## Amendments (r6, won't-fix closure 2026-08-14)
+
+Adds a deliberate no-fix closure to the terminal resolution reasons. `won't-fix` is selectable via `resolve --reason won't-fix` and serializes verbatim (not kebab-cased) as the record reason. It is for cuts whose original claim is confirmed real and whose named workflow still exists, but which are deliberately not repaired — one-off/environment-specific facts that will not recur, repairs whose cost clearly exceeds benefit, or external root causes that cannot be changed with a durable workaround. It differs from `obsolete` (named workflow/requirement no longer exists), `duplicate` (same defect already represented by another canonical cut), and `false-observation` (original claim demonstrably incorrect). A `won't-fix` resolve still requires a note recording the assessment; the decision itself is made by a human user through the fix-papercuts skill, never autonomously by an agent.
 
 ## Amendments (r5, contract v2 lifecycle 2026-08-14)
 

@@ -41,7 +41,7 @@ papercuts doctor                         # validate the log file
 - **Concurrency-safe**: multiple agents on one file are fine (advisory locking, atomic appends, self-healing torn lines).
 - **Deterministic**: content-addressed IDs, stable sort, reproducible-clock override for tests.
 - **Never rewrites history**: `block`, `unblock`, and terminal `resolve` operations append events; the log is a journal, not a database.
-- **Explicit lifecycle results**: mutation envelopes distinguish IDs changed now, already in target state, and dry-run candidates. Resolution reasons are `fixed`, `already-fixed`, `duplicate`, `false-observation`, or `obsolete`.
+- **Explicit lifecycle results**: mutation envelopes distinguish IDs changed now, already in target state, and dry-run candidates. Resolution reasons are `fixed`, `already-fixed`, `duplicate`, `false-observation`, `obsolete`, or `won't-fix` (deliberately not repaired — one-off facts, cost exceeding benefit, or unchangeable external root cause; requires a note).
 - **Evidence is bounded and redacted**: `add` can attach a failed command (`--cmd`), exit status (`--exit`), UTF-8 stderr file (`--stderr-file`), or free-form note (`--evidence`). `--stderr-file` rejects non-regular files and inputs over 1 MiB before sanitized stderr is stored up to 4096 UTF-8 bytes. Redaction is best-effort, so never feed raw environment dumps.
 
 ## Give your agents the pen

@@ -224,6 +224,7 @@ mod tests {
             vec!["papercuts", "add", "-"],
             vec!["papercuts", "list", "--status", "all"],
             vec!["papercuts", "resolve", "abcd"],
+            vec!["papercuts", "resolve", "abcd", "--reason", "won't-fix"],
             vec!["papercuts", "block", "abcd"],
             vec!["papercuts", "unblock", "abcd"],
             vec!["papercuts", "schema", "record"],
